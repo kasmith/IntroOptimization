@@ -1,0 +1,1401 @@
+---
+title: "CBMM Tutorial: Optimization Notes"
+date: "August 12, 2018"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    theme: cerulean
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+remake_graphs = F
+options(expressions=50000)
+```
+
+This page goes through the concepts that will be taught in the Optimization tutorial at the 2018 CBMM Summer School at Woods Hole. It will provide further detail than the in-class tutorial in two ways:
+
+1. It includes R code that implements the examples discussed in the tutorial -- this is hidden by default but can be expanded by clicking on the `Code` buttons on the right
+2. There are sections that provide detail on optimization that will be skipped in the tutorial
+
+```{r Load Packages}
+# We need to load this package to make the plots
+library(ggplot2)
+library(ggrepel)
+```
+
+# Introduction
+
+The purpose of this tutorial is to get everyone on the same page with some of the concepts and terminology that underlie optimization. These optimization techniques and concepts are used in many of the tools that will be discussed in this program -- including machine learning, neural networks, and probabilistic programming -- so it is useful for everyone to understand (1) what optimization is trying to do, (2) how this works at a high level, and (3) the terminology used for optimization (since many of these terms will be thrown around elsewhere in this program). This is not meant to be a tutorial about the mathematics behind optimization, and while there will be pointers to how to implement these techniques in various common programming languages (R, Python, and Matlab), implementation will not be the focus. Instead, it is important to understand the *what* and *why* of optimization to understand how some of the techniques discussed later in the course will be used.
+
+The important terms to know include:
+
+- Likelihood
+- Maximum likelihood estimate
+- Cost function
+- Gradient
+- Gradient descent
+- Global / local minima
+- Convex / non-convex functions
+- Differentiable functions
+- Stochastic gradient descent
+- Regularization
+- Sparse coding
+- Momentum
+
+The main focus of optimization in this tutorial will be parameter fitting: given a known model with an unknown parameterization, how should you assign a parameterization based on data you have observed. There are other types of optimization that use related but different techniques, but these problems will not be discussed in detail so that we can focus on the basic concepts of optimization for parameter fitting.
+
+However, before we can use optimization for parameter fitting, we have to know what we are trying to optimize. For this, we will start with the *likelihood* function.
+
+# Likelihood & cost functions
+
+## The definition of likelihood
+
+> [**Likelihood:**](https://en.wikipedia.org/wiki/Likelihood_function) The probability of observing your data given a particular model
+
+Assuming that you have a set of data $D={d_1,d_2,...,d_N}$, and a model with parameters $\theta$, then the likelihood $L(\theta|D)$ is noted as:
+
+<center>
+$$L(\theta|D) = P(D|\theta)$$
+</center>
+
+If your data is independent and identically distributed (I.I.D.), then you can treat this as the multiplication of the probabilities of observing each individual data point:
+
+<center>
+$$L(\theta|D) = \underset{i...N}{\prod}P(d_i|\theta)$$
+</center>
+
+This may be very abstract, so let's try an example to make this more concrete.
+
+## An example: balls in urns
+
+Suppose you have an urn that you know contains only black and white balls, but you don't know anything at all about the proportion of each. You pull a number of balls with replacement and get the sequence **BBWBWWBWWWBW**.
+
+The first thing we can do is assume that we know the proportion of black balls, and ask ourselves how likely it would have been to draw that sequence if we were right about the proportion. We will call the proportion of black balls $\theta$ in this case.
+
+Because we know that $P(B) = \theta$ and $P(W) = (1-\theta)$ and that each draw is I.I.D., we can calculate the probability of getting that sequence as the product of the probabilities of each of the individual draws:
+
+<center>
+$$L(\theta|D)=\underset{i...N}{\prod}\begin{cases}\theta & if\ d_i=B \\ (1-\theta) & if\ d_i=W\end{cases}$$
+</center>
+
+Now we can use that equation to calculate the probability of getting that specific sequence if the balls were equally distributed:
+
+```{r Balanced Urn Likelihood}
+urn.data = c("B", "B", "W", "B", "W", "W", "B", "W", "W", "W", "B", "W")
+
+individual.probabilities = ifelse(urn.data=="B", 0.5, 1-0.5)
+
+total.probability = prod(individual.probabilities)
+
+writeLines(paste('Probability of sequence with equal distribution:',total.probability,sep=' '))
+```
+
+And similarly if black balls made up 75% of the urn:
+
+```{r 75pct Coin Likelihood}
+individual.probabilities = ifelse(urn.data=="B", 0.75, 1-0.75)
+
+total.probability = prod(individual.probabilities)
+
+writeLines(paste('Probability of sequence with 75% black ball distribution:',total.probability,sep=' '))
+```
+
+Of course, we can easily abstract this as a function of and $\theta$, and graph the likelihood as a function of any value of the proportion of black balls from 0 to 1:
+
+```{r Initialize Likelihood}
+urn.likelihood = function(theta, data = urn.data) {
+
+  individual.probabilities = ifelse(data=="B", theta, 1-theta)
+  
+  total.probability = prod(individual.probabilities)
+  
+  return(total.probability)
+}
+
+thetas = seq(.01, .99, by=.01)
+
+likelihoods = sapply(thetas, urn.likelihood)
+
+qplot(x = thetas, y = likelihoods, geom = 'line', xlab = expression(theta), ylab = "Likelihood")
+```
+
+```{r Save Likelihood, echo=FALSE, include=FALSE}
+ggsave("fig_urn_likelihood.png", width = 4, height = 2, units='in')
+ggsave("fig_urn_likelihood_slim.png", width=2, height=2, units='in')
+```
+
+Note that the likelihood is **not** a probability function - the area under the likelihood curve does not have to sum to one.
+
+But what does this tell us about the urn? We know nothing about the proportion of the black balls a priori, so what does this data tell us about what our best guess should be?
+
+## Maximum likelihood
+
+Based solely on the data, the best estimate of the proportion will be the proportion parameterization that makes the data most likely; also known as the *maximum likelihood estimator*.
+
+> [**Maximum likelihood estimator:**](https://en.wikipedia.org/wiki/Maximum_likelihood_estimation) The value of the parameters of a given model that maximizes the likelihood function for a set of data
+
+In mathematical notation, this is an $argmax$ over the likeihood function:
+
+<center>
+$$\theta_{MLE}=\underset{\theta}{\operatorname{argmax}}L(\theta|D)$$
+</center>
+
+So what is this value for the urn? This is value of $\theta$ at the peak of the likelihood graph above. Basic probability theory tells us this value is $\theta=5/12$ since we saw five black balls out of twelve observations.
+
+But if we start using more complex models than simple binary probabilities, determining the maximum likelihood estimator becomes more difficult. This is why we need optimization techniques. But before we can apply those techniques easily, we need to talk about a transformation of the likelihood function, called the *cost function*.
+
+## Cost functions
+
+> [**Cost function:**](https://en.wikipedia.org/wiki/Loss_function) A function that maps a set of events into a number that represents the “cost” of that event occurring
+
+The cost function, also known as the *loss function* or *objective function*, is the function that optimization works over -- we want to find the optimal set of events to minimize the "cost" of those events.
+
+This is extremely general, but has a one-to-one mapping with likelihood: for parameter fitting the cost function is often calculated as the negative logarithm of the likelihood function:
+
+<center>
+$$C(\theta,D)=-\log(L(\theta|D))$$
+</center>
+
+You can think of this as the total cost of getting observations wrong under your model. For instance, if you say the urn is a 50/50 mix of black and white balls, then no matter what ball you pull from the urn, you will incur the same moderate cost for completely hedging your bets. On the other hand, if you claim that the probability of drawing a black ball should be 90%, then if you pull a black ball, you only have a small cost (you still hedged your bet a bit), but if you pull a white ball, you have a large cost.
+
+For the rest of this tutorial, we will use this cost function (or slight variants), but I want to leave you with the notion that other cost functions are often used in other domains using alternate optimization techniques. For instance:
+
+- Planning robotic joint movements requires minimizing the cost of motion to accomplish the task under constraints about how the joint can possibly move
+- The [*traveling salesman problem*](https://en.wikipedia.org/wiki/Travelling_salesman_problem) in which a salesman must travel to every one of a set of cities as cheaply as possible requires choosing the set of travel paths that minimizes the travel costs
+
+So if we are using cost as the negative log-likelihood, we can reformulate the cost of a given parameterization of the urn mixture and plot it:
+
+```{r Likelihood cost}
+urn.cost = function(theta, data = urn.data) {
+  return(-log(urn.likelihood(theta, data)))
+}
+costs = sapply(thetas, urn.cost)
+qplot(x = thetas, y = costs, geom = 'line', xlab = expression(theta), ylab = "Cost")
+```
+
+```{r Save Cost, echo=FALSE, include=FALSE}
+ggsave("fig_urn_cost_slim.png", width = 2, height = 2, units = 'in')
+ggsave("fig_urn_cost.png", width = 4, height = 2, units = 'in')
+```
+
+Make a special note of the equivalence here: the point that was the maximum of the likelihood function is also the point that is the minimum of the cost function -- this is of course true since the log-likelihood is a strictly increasing function of the likelihood, so reducing the negative log-likelihood will always increase the likelihood.
+
+Now that we have a cost function, we can start discussing how to find the minimum using optimization techniques.
+
+### Why is the cost function negative log-likelihood?
+
+This question can be broken down into two parts: (1) why negative, and (2) why the logarithm of the likelihood?
+
+1. It is negative due to convention. Many of these optimization techniques come out of physics where the objective is to minimize the energy of a system. Therefore optimization will by default try to minimize functions.
+
+2. Taking the logarithm of the likelihood makes the numbers we work with much more tractable and smooth, and changes multiplication to addition. Even with the 12 data points we had the maximum likelihood (at $\theta=5/12$) is $0.000289$. With hundreds of data points, the likelihood becomes much, much smaller, even beyond the limits of computer precision. In addition, because of the identity $\log(A*B)=\log(A)+\log(B)$, adding new data becomes additive rather than multiplicative, which is often easier to deal with:
+
+<center>
+$$L(\theta|D)=\underset{i...N}{\prod}P(d_i|\theta)$$
+
+$$log(L(\theta|D))=\underset{i...N}{\sum}log(P(d_i|\theta))$$
+</center>
+
+```{r Cleanup_1, echo=FALSE, include=FALSE}
+rm(individual.probabilities, total.probability, thetas, likelihoods, costs)
+```
+
+# Single-variable optimization
+
+Our current cost function is a function of a single variable: the proportion of black balls. This makes optimization much simpler and allows for some technqiues that don't work well with multiple parameters. However, it also makes the concepts of optimization much easier to visualize, so it's a good starting point.
+
+We will begin with the technique of *grid search*.
+
+## Grid search
+
+The most naïve but simplest method for parameter optimization is to simply evaluate the cost function at each value of $\theta$ (spaced at small intervals), then pick the value of $\theta$ that gives you the minimum cost. It is called *grid search* because it can be visualized by placing a grid over the cost function and evaluating that at each point of the grid:
+
+```{r Grid Viz, echo=FALSE}
+ngrid = 20
+bseq = 1/(ngrid+2)
+ths = seq(bseq,1-bseq,by=bseq)
+csts = sapply(ths, urn.cost)
+dt = data.frame(theta=ths, cost=csts)
+ggplot(dt,aes(x=theta,y=cost)) + geom_line() + geom_vline(xintercept=ths,color='blue') + geom_point(color='blue') + xlab(expression(theta)) + ylab("Cost") + xlim(c(0,1))
+ggsave('fig_grid_search.png', width=4, height=2, units='in')
+rm(ngrid, bseq, ths, csts, dt)
+```
+
+This can be implemented simply by finding the point in our grid that has the lowest cost.
+
+```{r Grid Search}
+potential.thetas = seq(.001, .999, by=.001)
+
+calc.costs = sapply(potential.thetas, urn.cost)
+
+idx.theta = which(calc.costs == min(calc.costs))
+
+writeLines(paste("Grid search value:", potential.thetas[idx.theta], sep=' '))
+```
+
+Note that the precision of this value is limited by how fine your grid is -- for instance, here it tells you that the optimal value of $\theta$ is $0.417$ which is a rounded version of the true value: $0.41\bar6$ because we used grid spacings of $0.001$.
+
+This gave us a pretty good answer. So why do I call this naïve? To get the precision of $\theta$ to be within one thousandth of the acceptable range, we needed to call the function 1000 times. This wasn't too bad, but what if we needed to get that precision for two parameters? Then we would need to put down a 1000x1000 grid, which would require one million function calls. And three parameters? Well, that would be a 1000x1000x1000 grid, for one billion times we need to evaluate the cost function. So the computation required to do grid search blows up pretty quickly as we have more parameters to fit. This makes grid search pretty inappropriate for multi-parameter problems.
+
+Instead, we can use information about the function itself to save us some computation, even in single variable optimization.
+
+## Gradient descent
+
+Imagine you are on a camping trip and have pitched your tent in the lowest point of a valley. One day, you go hiking up a hill and get lost, but it's too foggy to see anything except what's right in front of you. How would you get back to camp? If you know that you need to get to the lowest point, a simple solution is to figure out which way is downhill, travel in that direction a bit, and keep repeating that process until you find camp.
+
+The optimization technique [*gradient descent*](https://en.wikipedia.org/wiki/Gradient_descent) works on a similar principle: you start at any value of $\theta$, then change your parameter in the direction that decreases the cost function, and keep repeating until there is only the tiniest decrease in cost with each step.
+
+Because most smooth functions have the property that the slope of the function is steep when $\theta$ is far away from the minimum and relatively flat when $\theta$ is close to the minimum, we will want to make our step size proportional to the slope of the cost function. If we call the slope of the cost function $\nabla C$, then we can choose a step size parameter $\gamma$ (also called the *learning rate*) so that the change in our guess of the parameter at each step is $-\gamma \nabla C$. So our change equation becomes:
+
+<center>
+$$ \theta_{t+1} = \theta_t - \gamma \nabla C(\theta_t) $$
+</center>
+
+To run the gradient descent algorithm, we must pick an initialization $\theta_0$, a value of $\gamma$, and a cutoff $\tau$ that represents how precise you want your estimate of the cost function to be. Then you start from $\theta_0$ and keep updating your best guess for $\theta$ until the change in the cost function from one step to the next is less than $\tau$ -- at that point your estimate of the optimal value of $\theta$ is good enough.
+
+Of course, this leaves us with the problem of calculating the slope at any value of $\theta$. However, a basic definition in calculus is that the slope of a function is just equal to its derivative, so we know that:
+
+<center>
+$$\nabla C = \frac{dC}{d\theta}$$
+</center>
+
+Since we know that $C(\theta)=-\log(\theta^5 * (1-\theta)^7)$, we can apply the rules of calculus to calculate the derivative (trust me on this one, or you can work it out yourself with the chain rule):
+
+<center>
+$$\nabla C(\theta) = \frac{7}{1-\theta} - \frac{5}{\theta}$$
+</center>
+
+The ability to analytically derive the gradient makes gradient descent much easier -- however, we will later discuss alternate methods when this derivation is not easily accessible.
+
+So now we can run our gradient descent. Here I'll assume we're way off and pick a starting theta value of $0.95$. I've also set $\gamma=0.002$ and $\tau=.000001$ to make the plot look nice and ensure the answer gets fairly close to the real one.
+
+```{r Do 1-var Gradient}
+theta = .95
+gamma = .002
+tau = .000001
+
+urn.gradient = function(theta) {
+  return(7/(1-theta) - 5/theta)
+}
+
+prior.cost = urn.cost(theta)
+
+# Anything to do with plot.thetas or plot.costs can be ignored - this is just for graphing purposes
+plot.thetas = theta
+plot.costs = prior.cost
+
+running = TRUE
+while(running) {
+  grad = urn.gradient(theta)
+  theta = theta - gamma * grad
+  new.cost = urn.cost(theta)
+  plot.thetas = c(plot.thetas, theta)
+  plot.costs = c(plot.costs, new.cost)
+  if(abs(new.cost - prior.cost)< tau) {
+    running = FALSE
+  } else {
+    prior.cost = new.cost
+  }
+}
+# This is our solution
+writeLines(paste("Gradient descent value:",theta,sep=' '))
+```
+
+```{r plot grid}
+all.thetas = seq(.01,.99,by=.01)
+all.costs = sapply(all.thetas,urn.cost)
+plot.df = data.frame(theta=plot.thetas,cost=plot.costs)
+qplot(x=all.thetas, y=all.costs, geom='line', xlab=expression(theta), ylab="Cost") +
+  geom_point(data=plot.df, aes(x=theta,y=cost),color='blue')
+```
+
+```{r Make Gradient GIF, echo=FALSE, include=FALSE}
+if(remake_graphs){
+  # Redo for shorter GIF
+  new.tau = .001
+  theta = .95
+  prior.cost = urn.cost(theta)
+  plot.thetas = theta
+  plot.costs = prior.cost
+  running = TRUE
+  while(running) {
+    grad = urn.gradient(theta)
+    theta = theta - gamma * grad
+    new.cost = urn.cost(theta)
+    plot.thetas = c(plot.thetas, theta)
+    plot.costs = c(plot.costs, new.cost)
+    if(abs(new.cost - prior.cost)< new.tau) {
+      running = FALSE
+    } else {
+      prior.cost = new.cost
+    }
+  }
+  
+  for(i in 1:length(plot.costs)) {
+    
+    plnm = sprintf("GradD_Figs/GradD_%03d.png",i)
+    this.th = plot.thetas[i]
+    this.cost = plot.costs[i]
+    inst.grad = urn.gradient(this.th)
+    df.grad = data.frame(theta = c(this.th-.2,this.th),
+                         cost = c(this.cost - inst.grad*.2, this.cost))
+    
+    plt = qplot(x=all.thetas, y=all.costs, geom='line', xlab=expression(theta), ylab="Cost") +
+      geom_line(data=df.grad, aes(x=theta,y=cost),color='blue') + 
+      geom_point(data=data.frame(x=this.th,y=this.cost),aes(x=x,y=y),color='blue') + 
+      coord_cartesian(xlim = c(0,1), ylim = c(5,35))
+    
+    ggsave(plnm, plt, width = 4, height = 4, units = 'in')
+  
+  }
+}
+
+```
+
+Our solution got very close to 5/12, which is exactly what we want! Looking at the graph above, the blue dots are places we stopped in the process of gradient descent. You can note that even though we started far off from the answer, because the gradient was so steep we took a large jump for the first step (which is good), then took smaller and smaller steps as the cost function flattened out until we got very close to the optimal value.
+
+## Approximating the derivative
+
+In the urn example, calculating the gradient was simple because we could analytically determine the derivative. But in many cases, this isn't possible. What then? Are we out of luck for using gradient descent?
+
+Nope! Instead we approximate the slope numerically. Remember that a basic definition of the slope of the line is "rise over run". Although the cost functions that we often work with are not perfectly linear, you can get the approximation of the slope at any point by determining how much the cost function changes with very small changes in the parameterization ($\epsilon$):
+
+<center>
+$$\nabla C(\theta) \approx \frac{C(\theta + \epsilon) - C(\theta - \epsilon)}{2\epsilon}$$
+</center>
+
+So we can rerun our gradient descent algorithm, but now we'll use a gradient approximation:
+
+```{r Do 1-var Gradient Approximation}
+theta = .95
+gamma = .002
+tau = .000001
+
+urn.gradient.approx = function(theta, epsilon = .001) {
+  return((urn.cost(theta+epsilon) - urn.cost(theta-epsilon)) / (2*epsilon))
+}
+
+prior.cost = urn.cost(theta)
+
+running = TRUE
+while(running) {
+  grad = urn.gradient.approx(theta)
+  theta = theta - gamma * grad
+  new.cost = urn.cost(theta)
+  if(abs(new.cost - prior.cost)< tau) {
+    running = FALSE
+  } else {
+    prior.cost = new.cost
+  }
+}
+
+# This is our solution
+writeLines(paste("Gradient descent value:",theta,sep=' '))
+
+```
+
+```{r Make GradApprox GIF, echo=FALSE, include=FALSE}
+if(remake_graphs){
+  # Redo for shorter GIF
+  new.tau = .001
+  theta = .95
+  prior.cost = urn.cost(theta)
+  plot.thetas = theta
+  plot.costs = prior.cost
+  running = TRUE
+  while(running) {
+    grad = urn.gradient.approx(theta)
+    theta = theta - gamma * grad
+    new.cost = urn.cost(theta)
+    plot.thetas = c(plot.thetas, theta)
+    plot.costs = c(plot.costs, new.cost)
+    if(abs(new.cost - prior.cost)< new.tau) {
+      running = FALSE
+    } else {
+      prior.cost = new.cost
+    }
+  }
+  
+  for(i in 1:length(plot.costs)) {
+    
+    plnm = sprintf("GradApprox_Figs/GradApprox_%03d.png",i)
+    this.th = plot.thetas[i]
+    this.cost = plot.costs[i]
+    inst.grad = urn.gradient(this.th)
+    df.grad = data.frame(theta = c(this.th-.2,this.th+.2),
+                         cost = c(this.cost - inst.grad*.2, this.cost + inst.grad*.2))
+    
+    plt = qplot(x=all.thetas, y=all.costs, geom='line', xlab=expression(theta), ylab="Cost") +
+      geom_line(data=df.grad, aes(x=theta,y=cost),color='blue') + 
+      geom_point(data=data.frame(x=this.th,y=this.cost),aes(x=x,y=y),color='blue') + 
+      coord_cartesian(xlim = c(0,1), ylim = c(5,35))
+    
+    ggsave(plnm, plt, width = 4, height = 4, units = 'in')
+  
+  }
+}
+rm(theta, gamma, tau, prior.cost, new.cost, plot.costs, plot.thetas, this.th, this.cost, plnm, inst.grad, df.grad, plt, all.thetas, all.costs)
+```
+
+Great! The answer is almost exactly the same as before! Of course, it's better to know the gradient function than not, since we have to call the cost function twice to approximate it instead of the gradient function once, but it works well if that's not available.
+
+Now we have implemented a simple gradient descent function, even when we can't calculate the derivative. If you use state-of-the-art methods from toolboxes in modern programming languages, you will be using algorithms that are more efficient and require less hand-tuning -- however, this simple gradient descent algorithm should give you a feel for how optimization algorithms work.
+
+## Local vs. global minima
+
+Let's switch to an arbitrary cost function in the form (don't ask me where it came from -- I just made it up):
+
+<center>
+$$ C(\theta) = \theta * (\theta + 1) * (\theta + 1.5) * (\theta * 2) $$
+</center>
+
+Now we can place an initial guess about the best parameter at $-2.5$, and run our gradient descent algorithm:
+
+```{r Bad Concave Approx}
+arbitrary.cost = function(theta) {
+  return(theta*(theta+1)*(theta+1.5)*(theta-2))
+  }
+arbitrary.gradient = function(theta, epsilon = 0.001) {
+  return( (arbitrary.cost(theta+epsilon) - arbitrary.cost(theta-epsilon)) / (2*epsilon) )
+}
+
+theta = -2.5
+gamma = .0001
+tau = .000001
+
+prior.cost = arbitrary.cost(theta)
+
+running = TRUE
+while(running) {
+  grad = arbitrary.gradient(theta)
+  theta = theta - gamma * grad
+  new.cost = arbitrary.cost(theta)
+  if(abs(new.cost - prior.cost)< tau) {
+    running = FALSE
+  } else {
+    prior.cost = new.cost
+  }
+}
+writeLines(paste("Gradient descent value:",theta,sep=' '))
+```
+
+We have an answer -- great, right?
+
+Before we celebrate, let's take a look at that function:
+
+```{r Concave Plot}
+thetas = seq(-3,3,by=.01)
+costs = sapply(thetas,arbitrary.cost)
+qplot(thetas,costs,geom='line',xlab=expression(theta),ylab='Cost') + coord_cartesian(ylim=c(-8,10))
+```
+```{r Save Concave, echo=FALSE}
+ggsave("fig_concave_plot.png",width=2,height=2,units='in')
+```
+
+Something isn't right here - gradient descent says the minimum cost parameter is at $\theta=-1.29$, but a quick view of the graph shows us that the **real** minimum lies between 1 and 2. To explain why this happened, we need to first define different types of minima: *local minima* versus *global minima*.
+
+> Local minimum: a point $x^*$ is a local minimum if it is the lowest value of the function within some range centered on $x^*$
+
+> Global minimum: a point $x^*$ is a global minimum if it is the lowest value of the function across all allowable values of the parameter
+
+The difference becomes apparent if we label the graph:
+
+```{r Note loc glob min, echo = FALSE}
+circleFun = function(center, npts = 628) {
+  thts = seq(0,2*pi,length.out=npts)
+  xs = center[1] + 0.2*cos(thts)
+  ys = center[2] + sin(thts)
+  return(data.frame(x=xs,y=ys))
+}
+
+qplot(thetas,costs,geom='line',xlab=expression(theta),ylab='Cost') + coord_cartesian(ylim=c(-8,10)) +
+  geom_path(data=circleFun(c(1.35,-5.88)),aes(x=x,y=y),linetype='dashed') +
+  annotate(geom='text',label = "Global Minimum", x = 1.35, y = -7.5) +
+  geom_path(data=circleFun(c(-1.29,-.26)),aes(x=x,y=y),linetype='dashed') +
+  annotate(geom='text',label = "Local Minimum", x = -1.29, y = -2)
+
+```
+
+Gradient descent keeps going downhill until it reaches a point where the function is flat (so the gradient is zero). But this is true of both local and global minima, so gradient descent is only guaranteed to give you a local minimum - it makes no claims about giving you a globally optimal result. With the tools we have, there's not much we can do about this other than try to initialize our function at lots of different places to hope to hit the global minimum. There are tools within the realm of [*global optimization*](https://en.wikipedia.org/wiki/Global_optimization) to deal with this, but those are far outside of the scope of this tutorial.
+
+Instead, we are going to introduce a new definition: that of a *convex function* versus a *non-convex function*:
+
+> **Convex function:** A function is convex if for every line segment drawn between two points on the function, that line segment passes above the graph.
+
+> **Non-convex function:** A function is non-convex if it is not convex (simple, huh?)
+
+Using this definition, we can clearly see that our arbitrary cost function is non-convex by drawing a red dashed line between two points that goes underneath the function:
+
+```{r Show NonConv}
+linedf = data.frame(x=c(1.35,-1.29), y=c(-5.88,-.26))
+
+qplot(thetas,costs,geom='line',xlab=expression(theta),ylab='Cost') + coord_cartesian(ylim=c(-8,10)) +
+  geom_line(data=linedf,aes(x=x,y=y), linetype = 'dashed', color = 'red')
+
+```
+
+```{r Save NonConv}
+ggsave('fig_nonconv.png',width=2,height=2,units='in')
+```
+
+But why do we care about convexity? Because of a very important, very nice function that convex functions have:
+
+> *Any minimum on a convex function is guaranteed to be a global minimum*
+
+This means that if we are working with convex functions, we don't have to worry about getting stuck in a local minimum with gradient descent, because there are only global minima. In fact, this property is so nice that there is a subfield of optimization called [*convex optimization*](https://en.wikipedia.org/wiki/Convex_optimization) that deals only with these functions.
+
+Luckily for us, most of the functions that we'll be optimizing in this course are convex, so we can use optimization methods based on gradient descent to solve them. But now if you hear someone say a phrase like "This function is convex" you can interpret it as "We're lucky that we can use easy methods to find the minimum!" And if you hear someone say "Unfortunately this function is non-convex" they really mean, "Optimizing this is a pain" followed by some swearing. (As someone who has done a lot of non-convex optimization, I can tell you that feeling is very real.)
+
+## Implementation {.tabset}
+
+Most high-level programming languages have ample support for optimization. To demonstrate this, we will find the value of $x$ that minimizes the objective function $f(x)=(x-1)*(x+2)$ in R, Python, and Matlab.
+
+Note that by default these languages don't use gradient descent for single-variable optimization, instead relying on faster algorithms with less tuning (e.g., [Brent's method](https://en.wikipedia.org/wiki/Brent%27s_method) in Python or [golden section search](https://en.wikipedia.org/wiki/Golden_section_search) in R and Matlab).
+
+### R
+
+Single-variable optimization in R is done via the `optimize` function. This function takes in two arguments at its core: first, a function to optimize, and second, a range in which to search the inputs to the function (if you're not sure, you can make this very broad -- if the true minimum falls outside of this range it will not be found). Optimization will return a list with two elements: `$minimum` gives you the value of the input that provides the minimum, and `$objective` provides the value of the function at the minimum.  For more details about this function, you can type `?optimize` in R.
+
+We will optimize a very simple function: $f(x)=(x-1)*(x+2)$:
+
+```{r R Opt Impl}
+opt.fnc = function(x) {
+  return((x-1)*(x+2))
+}
+
+o = optimize(opt.fnc, c(-10, 10))
+
+# The best value of x
+writeLines(paste('The best value of x:',o$minimum,sep=' '))
+
+# The minimum value of the function
+writeLines(paste('The minimum value of the function:',o$objective,sep=' '))
+```
+
+### Python
+
+In order to run optimization in Python, you will need the [SciPy](scipy.org) package installed. SciPy has a number of handy functions for performing optimization from within [scipy.optimize](http://docs.scipy.org/doc/scipy/reference/optimize.html).
+
+To do single-variable optimization, you will use the `minimize_scalar` function. This function takes two arguments: the function to minimize, and a guess at the range of parameter values. The one difference here is that even if you guess the parameter range wrong, the `minimize_scalar` function *can* find a minimum outside of that range. This will return an object that has some information about the optimization, with the two important values being `.x` as the value of the input that provides the minimum, and `.fun` that provides the value of the function with that input (it also has information about the number of times the optimization proceedure calls the cost function and iterates). For more details, you can look at the [scipy.optimize.minimize_scalar](http://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.minimize_scalar.html#scipy.optimize.minimize_scalar) page.
+
+We will optimize a very simple function: $f(x)=(x-1)*(x+2)$:
+
+```{python Py Opt Impl}
+from scipy.optimize import minimize_scalar
+
+def opt_fnc(x):
+  return (x-1)*(x+2)
+  
+o = minimize_scalar(opt_fnc, [-10, 10])
+print o
+
+print ""
+print "The best value of x:", o.x
+print "The minimum value of the function:", o.fun
+```
+
+### Matlab
+
+Single variable optimization in Matlab is done using the [`fmindbnd`](http://www.mathworks.com/help/matlab/ref/fminbnd.html) function, which finds the minumum of a function for a fixed interval. This function takes a minimum of 3 arguments: `fun` (function to minimize), `x1` (lower bound), and `x2` (upper bound). The function returns the input value that provides the minimum, defined as `o` in our code. The value of the minumum is computed by plugging `o` into our function, `opt_fun(o)`. 
+
+Below is a code snippet of single variable optimization to run in Matlab -- however, due to the proprietary nature of Matlab you will need to run it yourself to see the output.
+
+```
+function f_x = opt_fun(x)
+   f_x = (x-1)*(x-2); 
+end
+
+o = fminbnd(@opt_fun, -10, 10);
+fprintf('Minimum: %f Objective: %f\n\n', opt_fun(o), o);
+```
+
+# Multi-variable optimization
+
+So far we have learned how to turn a model with a single parameter into a cost function, then use gradient descent to find the best parameter for that model. However, most of the time we won't need to fit just a single parameter, we'll need to fit many (reaching into the thousands when we train Neural Networks, for instance). For these cases, the general concept of how we fit our parameters will be the same -- find the best step to take to get closer to the optimal parameters, then take that step -- but we'll have to extend those concepts to work with multiple parameters.
+
+So let's start with a toy example from CBMM. You may notice that occasionally your fellow students might miss a class (the miscreants!), and you hypothesize that this is for one of two reasons: (1) they are busy with their projects and prefer to work somewhere quiet, or (2) they are too hungover from the prior night of partying to make it to class. Of course, these reasons are not deterministic -- some people who are busy with projects might still come to class, and some hungover people can still drag themselves out of bed. You can tell who is consumed with their projects because you can see them working, and you can tell who is hungover, but you want to know how those things influence whether people skip class.
+
+We can therefore treat this as a *noisy-or* model: both working on projects or hangovers can cause someone to skip, and we want to work back from our observations to determine how likely each is to cause a skip irrespective of the other cause. So we will define $P(Skip|Working)=\theta_{work}$ and $P(Skip|Hungover)=\theta_{hungover}$, and so using basic probability theory we can say that:
+
+<center>
+$$P(Skip) = \begin{cases}
+0 & if\ not\ working \ \& \ not\ hungover \\
+\theta_{work} & if\ working \ \& \ not\ hungover \\
+\theta_{hungover} & if \ not\ working \ \& \ hungover \\
+\theta_{work}+\theta_{hungover}-\theta_{work}*\theta_{hungover} & if\ working \ \& \ hungover \end{cases}$$
+</center>
+
+Now let's get our observations. We'll say that at any time 60% of you are working on your projects because you're so studious, and 40% of the class is hungover -- these are not mutually exclusive, so some people can miss class because they are working on their project while hungover.
+
+```{r Hidden probs, echo=FALSE}
+miss.given.working = .3
+miss.given.hungover = .4
+```
+
+We also have two hidden variables: $\theta_{work}$ and $\theta_{hungover}$ are used to determine how many people skip class in the data, but you don't get to know what those probabilities are yet -- you have to figure them out! But we do know what individual observations look like:
+
+```{r Making data}
+set.seed(11662016)
+n.obs = 200
+attendance.obs = data.frame(Working = rbinom(n.obs,1,.6) == 1,
+                         Hungover = rbinom(n.obs,1,.4) == 1)
+
+# Here there are two hidden variables: miss.given.working and miss.given.hungover
+# These will be revealed later, but just trust that they exist for now
+
+missing.work.prob = ifelse(attendance.obs$Working, miss.given.working, 0)
+missing.hung.prob = ifelse(attendance.obs$Hungover, miss.given.hungover, 0)
+attendance.obs$Missing = rbinom(n.obs,1,missing.work.prob) | rbinom(n.obs,1,missing.hung.prob)
+
+print(head(attendance.obs))
+
+print(with(attendance.obs,table(Working,Hungover,Missing)))
+```
+
+Now we need to make our cost function. Here we are going to give the cost function only a single input: `params`. This is for a good reason: the optimization techniques you use with more than one variable are the same regardless of whether you have a two or twenty variable function, so the built-in functions for multi-variable optimization in most programming languages require that the function you are minimizing take in a vector of parameters in order to function in a generalizable way across the number of parameters. Therefore, we are going to follow that convention.
+
+Beyond that though, we can just implement the noisy-or math discussed above. We can define our parameters $\theta = [\theta_{work}, \theta_{hungover}]$ and use a noisy-or to determine the predicited probability of missing class. The likelihood of each observation is therefore the predicted probability if that student is missing, or one less the predicted probability if they are there. Finally, as before the cost is the total negative log-likelihood.
+
+```{r MD Cost}
+attendance.cost = function(params, data=attendance.obs) {
+  
+  theta.work = params[1]
+  theta.hung = params[2]
+  
+  predicted.miss.from.work = ifelse(data$Working, theta.work, 0)
+  predicted.miss.from.hung = ifelse(data$Hungover, theta.hung, 0)
+  predicted.miss = predicted.miss.from.work + predicted.miss.from.hung - 
+    (predicted.miss.from.work * predicted.miss.from.hung)
+  
+  likelihood = ifelse(data$Missing, predicted.miss, 1 - predicted.miss)
+  cost = -sum(log(likelihood))
+  return(cost)
+}
+```
+
+We can see what this cost function looks like using a 2-D plot below. The more red an area is, the lower the cost (which is where we would like to end up). The dashed lines are contour lines - each line represents a change of 10 points of log-likelihood.
+
+```{r MD grid}
+attendance.grid = data.frame(work = rep(seq(.01,.99,by=.01),times=99),
+                             hung = rep(seq(.01,.99,by=.01),each=99))
+attendance.grid$cost = mapply(function(w,h){attendance.cost(c(w,h))}, 
+                               attendance.grid$work, attendance.grid$hung)
+attendance.plot = ggplot(attendance.grid, aes(x=work, y=hung)) + 
+  geom_raster(aes(fill=cost)) + scale_fill_gradient(low='red', high='yellow', trans = 'log') +
+  stat_contour(aes(z=cost),binwidth=10, color = 'black', linetype = 'dashed') +
+  xlab('P(Missing | Working)') + ylab('P(Missing | Hungover)')
+print(attendance.plot)
+```
+
+```{r Save MD Grid, echo=FALSE}
+ggsave('fig_md_grid.png',attendance.plot + theme(legend.position = 'none'),width=3,height=2,units='in')
+```
+
+You can see that the cost plot flattens out and reaches the bottom somewhere around the point $(0.25, 0.4)$, so we hope our optimization function reaches somewhere in that area. But most of the time, we won't be able to visualize this cost landscape -- we only did now because of a lot of compuatation (effectively grid search) and the fact that it's two dimensional for two parameters. Without this plot, we would need another method -- why not gradient descent?
+
+## Multi-dimensional gradients
+
+The good news is that the exact same idea behind gradient descent in one dimension works in multiple directions, provided you define your gradient correctly. In one dimension, the gradient was just the slope of the function but we didn't need to worry about the direction that it was pointing because there was only one dimension to step along. In multiple dimensions, on the other hand, we need to choose which direction we should take our step in. Therefore we define the gradient as a vector that points us in the direction of the steepest ascent in the cost function (so that going in the opposite direction of the gradient points in the direction of steepest descent). For those of you who recall multivariable calculus, this is captured as a vector of the partial derivatives of the cost function with respect to each of the individual parameters:
+
+<center>
+$$ \nabla C(\theta) = \bigg[ \frac{\partial C}{\partial \theta_0}, \frac{\partial C}{\partial \theta_1}, ..., \frac{\partial C}{\partial \theta_N} \bigg] $$
+</center>
+
+This means that we can approximate the gradient in a similar way we did in a single dimension, although now we have to perturb each parameter within $\theta$ one at a time to get each partial derivative.
+
+```{r MD Gradient}
+attendance.gradient = function(params, data=attendance.obs, epsilon = .001) {
+  work.plus = attendance.cost(params + c(epsilon,0), attendance.obs)
+  work.minus = attendance.cost(params + c(-epsilon,0), attendance.obs)
+  df.dwork = (work.plus - work.minus) / (2*epsilon)
+  
+  hung.plus = attendance.cost(params + c(0,epsilon), attendance.obs)
+  hung.minus = attendance.cost(params + c(0, -epsilon), attendance.obs)
+  df.dhung = (hung.plus - hung.minus) / (2*epsilon)
+  
+  return(c(df.dwork, df.dhung))
+}
+```
+
+We can see how this works by plotting gradients on our attendance cost function: the gradient points generally towards the bottom of the cost function, and when you are further away (and therefore in a steeper part of the function space) it is longer, suggesting you need to take a larger step. (Note that the arrows here point *against* the gradient in the downhill direction.)
+
+```{r Show MD gradient}
+make.gradient.arrow = function(params) {
+  grad = attendance.gradient(params)
+  end.x = params[1] - grad[1]*.001
+  end.y = params[2] - grad[2]*.001
+  return(geom_segment(x=params[1],y=params[2],xend=end.x,yend=end.y, arrow = arrow(length=unit(.02, 'npc')),color='blue'))
+}
+
+attendance.grad.plot = attendance.plot +
+        make.gradient.arrow(c(.2,.2)) + make.gradient.arrow(c(.8,.8)) + 
+        make.gradient.arrow(c(.2,.8)) + make.gradient.arrow(c(.8,.2))
+
+print(attendance.grad.plot)
+```
+
+```{r Save MD gradient arrow}
+ggsave('fig_md_gradarrow.png',attendance.grad.plot + theme(legend.position = 'none'), width=3, height=2, units='in')
+```
+
+So we have a cost function and a way of calculating the gradient. Let's start our gradient descent!
+
+This works almost identically to the one-dimensional case, except that we now treat our parameters and gradients as vectors instead of single values. But we still determine how far to step in a direction indicated by the gradient, then keeps taking those steps until the change in the cost function with a single step is very small.
+
+So let's apply it. Here I'm going to be very pessimistic about your dedication to the lectures and put the initial guess about the probability of missing class at 90% for both working and being hungover. But then with gradient descent:
+
+```{r Run MD Grad Descent, cache=TRUE}
+theta = c(.9, .9)
+gamma = .0001
+tau = .01
+
+prior.cost = attendance.cost(theta)
+running = TRUE
+
+# For showing the descent
+plt.xs = theta[1]
+plt.ys = theta[2]
+
+while(running) {
+  grad = attendance.gradient(theta)
+  theta = theta - gamma * grad
+  plt.xs = c(plt.xs, theta[1])
+  plt.ys = c(plt.ys, theta[2])
+  new.cost = attendance.cost(theta)
+  if(abs(new.cost - prior.cost) < tau) {
+    running = FALSE
+  } else {
+    prior.cost = new.cost
+  }
+}
+
+# Code to plot the descent path
+grad.plot = attendance.plot
+for (i in 2:length(plt.xs)) {
+  grad.plot = grad.plot + geom_segment(x = plt.xs[i-1], xend = plt.xs[i],
+                                       y = plt.ys[i-1], yend = plt.ys[i],
+                                       color = 'blue')
+}
+grad.plot = grad.plot + annotate('text', x = plt.xs[1], y = plt.ys[1], color = 'blue', label = 'O') +
+  annotate('text', x = theta[1], y = theta[2], color = 'blue', label = 'X')
+
+print(grad.plot)
+
+writeLines(paste("Theta_Work: ",theta[1],"\nTheta_Hungover: ",theta[2],sep=''))
+```
+
+```{r Make MDGradApprox GIF, echo=FALSE, include=FALSE}
+if(remake_graphs){
+  
+  theta = c(.9, .9)
+  gamma = .0002
+  tau = .01
+  prior.cost = attendance.cost(theta)
+  
+  for(i in 1:99) {
+    
+    plnm = sprintf("MDGrad_Figs/MDGrad_%99d.png",i)
+    this.plt = attendance.plot + make.gradient.arrow(theta) + theme(legend.position = 'none')
+    ggsave(plnm,this.plt,height=2,width=3,units='in')
+    
+    grad = attendance.gradient(theta)
+    theta = theta - gamma * grad
+    new.cost = attendance.cost(theta)
+    
+  }
+  
+}
+```
+
+
+You can see that gradient descent took us very quickly to what looks like the bottom of the cost function at the value $[\theta_{work}=0.24, \theta_{hungover}=0.42]$. And these values are pretty close to the actual probabilities that were used to generate the data (and about the best we can get given the data): $[\theta_{work}=0.3, \theta_{hungover}=0.4]$.
+
+Hopefully you now see how gradient descent with two parameters is a simple step from one parameter optimization. And it's even more trivial to go from two parameters to three, or as many as you need. No matter how many parameters you have, the gradient is still the direction in parameter space that is the steepest change in the cost function, so all you have to do is follow it down to the bottom.
+
+## Differentiable functions
+
+In the example above, we did not provide a function for the gradient and instead approximated it by taking small steps in each direction. This is a very inefficient way of getting the gradient, since you need to call the function twice for each parameter you are fitting during each gradient descent step. While there are more efficient methods for approximating the gradient, none of them get away from the curse of dimensionality, and so require lots of extra function calls and computation when you have lots of parameters.
+
+But if we have a way of quickly calculating the gradient, we don't need to waste computation to approximate it. And because we know that the gradient is just the vector of partial derivatives, for many (but not all) functions, we can analytically solve for the gradient function. The set of functions that have this feature are called *differentiable*:
+
+> **Differentiable:** A function is differentiable if there exists a function that provides the gradient at every allowable value of its parameters
+
+Note that typically this implies that the cost function itself is smooth and continuous at every point. For instance, if we wanted to use a threshold activation function in a neural network, this would not be differentiable because the value of the function changes suddently from 0 to 1 at the threshold. Instead, a sigmoid activation function is often used ($\phi(v_i) = 1/(1+e^{\sum(w_{i,j}*x_j)})$) because the [gradient is well known](https://en.wikipedia.org/wiki/Activation_function#Comparison_of_activation_functions).
+
+It is especially important in neural networks that cost and activation functions be differentiable because it allows us to easily backpropagate errors from the final prediction error back through earlier layers so that we know how to change the weights at each step. While this process will be described in other tutorials, the important concept to take away is that if the cost and activation functions are not fully differentiable the computational complexity to update the weights in a neural network sprials out of control. That is why you will often hear about neural networks as *fully differentiable* or *end-to-end differentiable* -- without this feature they would be impossible to scale with our current algorithms.
+
+## Implementation {.tabset}
+
+Just as with single-variable optimization, most modern high-level programming languages have methods for performing multi-variable optimization. Many of these functions use similar ideas to gradient descent (often called quasi-Newtonian methods) but are much more intelligent, allowing for (a) faster gradient calculations when it is not known, and (b) adaptive calculations of $\gamma$ for more efficient fitting (and so you don't have to guess at it).
+
+### R
+
+Implementing multi-variable optimization in R is simple with the `optim` function. All this requires at its core is two inputs: first a vector of initial parameter guesses, then the function to minimize. For instance, you can fit the attendance cost function using the code:
+
+```{r optim basic, warning=FALSE}
+o = optim(c(.95,.95), attendance.cost)
+print(o)
+```
+
+Note that the parameter values fit by `optim` are slightly different than the ones we got by our naive gradient descent -- $[0.24, 0.38]$ vs. $[0.24, 0.42]$, but are still relatively close and provide you with roughly the same cost.
+
+However, by default, the `optim` function uses a method for optimization that is unlike the gradient descent algorithm: the [Nelder-Mead](https://en.wikipedia.org/wiki/Nelder-Mead_method) method. This method does not require computing the gradient, and therefore can sometimes be more computationall efficient than gradient-based methods, but can also be more unstable and more likely to get stuck in local minima.
+
+Instead, I prefer to use the [BFGS algorithm](https://en.wikipedia.org/wiki/Broyden-Fletcher-Goldfarb-Shanno_algorithm) (which also happens to be the default Python optimization method). You can easily change to this algorithm using the `method` argument:
+
+```{r optim bfgs, warning=FALSE}
+o = optim(c(.95,.95), attendance.cost, method = 'BFGS')
+print(o)
+```
+
+There are two additional things you can do with the BFGS algorithm. First, if you can analytically calculate the gradient of your cost function, you can provide it using the `gr` argument to speed things up by skipping the approximation step. (Note in the code below this should work **slower** because we have a really inefficient approximation):
+
+```{r optim bfgs gr, warning=FALSE}
+o = optim(c(.95,.95), attendance.cost, method = 'BFGS', gr = attendance.gradient)
+print(o)
+```
+
+The other thing you can do is use a variant called the *L-BFSG-B* algorithm if you want to impose constraints on the parameter values. If you actually run the code above, you will notice that you get warnings that will tell you `NaNs produced` -- this is because the optimization algorithms will try out parameter values that will set the probabilities to less than 0 or greater than 1. The algorithms typically handle this sort of gracefully, but if you know that there are parameter values you cannot have, you can set bounds using the L-BFGS-B method and the `lower` and `upper` arguments:
+
+```{r optim lbfgsb}
+o = optim(c(.95,.95), attendance.cost, method = 'L-BFGS-B', lower = c(.00001, .00001), upper = c(.99999, .99999))
+print(o)
+```
+
+### Python
+
+The Python method for multi-variable optimization also uses the [SciPy](scipy.org) package, but now instead of `minimize_scalar` we will be using the `minimize` function at [scipy.optimize.minimize](http://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.minimize.html).
+
+The `minimize` function takes at a minimum two arguments: first, the function you are minimizing, and second, an initial guess at the parameters. Just as with functions in R, the function you are minimizing must only take one argument that should be a list or array of the parameters you hope to use.
+
+By default, Python will use the [BFGS algorithm](https://en.wikipedia.org/wiki/Broyden-Fletcher-Goldfarb-Shanno_algorithm), which I find to be very useful for multi-variable optimization. If you want to use another optimization algorithm, you can do so with the `method` argument -- you can review the documentation for option.
+
+One important alternative algorithm is a slight update to BFGS, called *L-BFGS-B*. The biggest benefit of this algorithm is that you can add bounds to your parameters with the `bounds` argument. This input should be a list of the same length as the number of parameters you are optimizing, each of `(min, max)` pairs. For instance, in this problem our parameters are probabilities, so we want to constrain the optimization fits to be between 0 and 1. Since the parameters can be set to the bounds values we cannot include 0 and 1 directly, and instead will set those to be very close: `(.0001, .9999)`.
+
+We will use the attendance example from above, but reformulating the actual function to calculate the cost using summary statistics rather than calculating the likelihood for each observation. But once that function is defined, applying the `minimize` function is simple, and gives us the same type of output as the `minimize_scalar` function:
+
+```{python Py MD Grad}
+from scipy.optimize import minimize
+from numpy import log
+
+attend_data = {'FF_F': 42, 'FF_T': 0, 'FT_F': 17, 'FT_T': 10,
+               'TF_F': 57, 'TF_T': 18, 'TT_F': 26, 'TT_T': 30}
+
+def att_fnc(theta, dat = attend_data):
+  pw, ph = theta
+  
+  log_likelihood = 0
+  
+  p_ft = ph
+  log_likelihood -= dat['FT_T']*log(p_ft) + dat['FT_F']*log(1-p_ft)
+  
+  p_tf = pw
+  log_likelihood -= dat['TF_T']*log(p_tf) + dat['TF_F']*log(1-p_tf)
+  
+  p_tt = ph + pw - ph*pw
+  log_likelihood -= dat['TT_T']*log(p_tt) + dat['TT_F']*log(1-p_tt)
+  
+  return log_likelihood
+  
+o = minimize(att_fnc, [.95, .95], method = 'L-BFGS-B', bounds = [(.0001,.9999),(.0001,.9999)])
+print o
+
+print ""
+print "The best value of the parameters:", o.x
+print "The minimum value of the function:", o.fun
+```
+
+### Matlab
+
+We will be performing this optimization in a manner similar to the single-variable case. Instead of `fminbnd`, we use `fminsearch`. In the method, we'll use fminsearch's default [Nelder-Mead algorithm](https://en.wikipedia.org/wiki/Nelder-Mead_method), which is an algorithm that does not use gradient descent (there are no built-in functions for gradient descent-based methods in Matlab). This method does not require computing the gradient, and therefore can sometimes be more computationall efficient than gradient-based methods, but can also be more unstable and more likely to get stuck in local minima.
+
+The `fminsearch` function takes 2 arguments: the function to optimize and an initial guess for the minimum. The function returns two values. The returned values are `x`, the value that computes the minimum of the function and `y`, the computed value of the function at the minimum.
+
+We will use the attendance example from above, but reformulating the actual function to calculate the cost using summary statistics rather than calculating the likelihood for each observation. But once that function is defined, applying the `fminsearch` function is simple:
+
+```
+attend_data = struct('FF_F' , 42, 'FF_T', 0, 'FT_F', 17, 'FT_T', 10, 'TF_F', 57, 'TF_T', 18, 'TT_F', 26, 'TT_T', 30);
+
+function log_likelihood = att_fnc(theta)
+    pw = theta;
+    ph = theta;
+    log_likelihood = 0;
+    
+    p_ft = ph;
+    log_likelihood = log_likelihood - attend_data.FT_T*log(p_ft)+ attend_data.FT_F*log(1-p_ft);
+    
+    p_tf = pw; 
+    log_likelihood = log_likelihood - attend_data.TF_T*log(p_tf) + attend_data.TF_T*log(1-p_tf);
+    
+    p_tt = ph + pw + ph*pw;
+    log_likelihood = log_likelihood - attend_data.TT_T*log(p_tt) + attend_data.TT_F*log(1-p_tt);
+end
+
+
+[xmin, y] = fminsearch(@att_fnc, 0.95);
+
+disp(xmin);
+disp(y);
+```
+
+# Optimization for neural networks and machine learning
+
+## Stochastic gradient descent
+
+In the examples above, the data we evaluated the cost function on only had 200 observations, so it was computationally very cheap to calculate the total cost function and approximate the gradient for each function call. But as we move into the domain of machine learning and neural networks, this no longer becomes so simple. For instance, ImageNet has over 14 million images in its training set, so if we wanted to evaluate a cost function to train a CNN on the entire dataset, it might take us a large amount of time to simply calculate the cost, and we might need to take at the very least tens of thousands of steps to get good weights on our artificial neurons. If we naively used the optimization techniques discussed above, we would never be able to get appropriate weights to perform artifical image recognition.
+
+But obviously these networks exist, so how do people do it? One important concept is that the cost function is decomposable -- the cost of errors on one image is independent of any other image, just like cost of misclassifying one of our urn or attendance examples is independent of all of the other examples. Or, in mathematical terms, the cost can be decomposed into a sum over the costs of individual observations:
+
+<center>
+$$ C(\theta, D) = \underset{i...N}{\sum}C(\theta, d_i)$$
+</center>
+
+If this assumption holds, then the actual gradient $\nabla C(\theta, D)$ can be approximated by the gradient from a single data point, denoted $\nabla C_i(\theta, D)$. This approximation will almost never point in exactly the same direction as the true gradient, but if you keep taking steps in the direction of the approximation, under certain assumptions about the learning rate $\gamma$ you are assured to assymptotically reach at least a local minimum as if you had used typical gradient descent.
+
+This technique of iteratively updating parameters is called [stochastic gradient descent](https://en.wikipedia.org/wiki/Stochastic_gradient_descent) because you stochastically approximate the gradient using each observation. The only other change from typical gradient descent is that you want to decrease the learning rate over time -- when you are starting out and your parameters are almost certainly wrong, if one of your data points gives you a gradient that points you in a very wrong direction, you can be forgiving and take a large step away, but if you are further along (and likely near the best set of parameters) you want to be more conservative in how you perform updates.
+
+
+```{r Run MD SGD, cache=TRUE}
+theta = c(.9, .9)
+gamma_init= .0001
+tau = .01
+
+n.obs = nrow(attendance.obs)
+
+prior.cost = attendance.cost(theta, attendance.obs)
+running = TRUE
+nth.iter = 0
+
+# For showing the descent
+plt.xs = theta[1]
+plt.ys = theta[2]
+plt.ns = 1
+
+while(running) {
+  nth.iter = nth.iter + 1
+  gamma = gamma_init / nth.iter
+  
+  obs.order = sample(1:n.obs, n.obs) # Shuffle the order of observations
+  tot.cost = 0
+  
+  for(d.i in obs.order) {
+    grad = attendance.gradient(theta, attendance.obs[d.i,])
+    theta = theta-gamma*grad
+    plt.xs = c(plt.xs, theta[1])
+    plt.ys = c(plt.ys, theta[2])
+    plt.ns = c(plt.ns, nth.iter)
+    tot.cost = tot.cost + attendance.cost(theta, attendance.obs[d.i,])
+  }
+  if(abs(tot.cost - prior.cost) < tau) {
+    running = FALSE
+  } else {
+    prior.cost = tot.cost
+  }
+}
+sgd_plt_dat = data.frame(x=plt.xs, y=plt.ys, niter=plt.ns)
+
+writeLines(paste("Theta_Work: ",theta[1],"\nTheta_Hungover: ",theta[2],sep=''))
+```
+
+Now let's look at how the parameter values evolve over time. I've colored the line based on which iteration of the data we are in (purple for the first run through, green for the second, then blue).
+
+```{r MD SGD plot, cache=TRUE}
+# Code to plot the descent path
+grad.plot = attendance.plot
+color.plt = c('purple','green','blue','grey','brown')
+for (i in 1:max(sgd_plt_dat$niter)) {
+  grad.plot = grad.plot + geom_path(data=subset(sgd_plt_dat, niter==i),
+                                    mapping=aes(x=x, y=y),color=color.plt[i])
+}
+grad.plot = grad.plot + annotate('text', x = plt.xs[1], y = plt.ys[1], color = 'blue', label = 'O') +
+  annotate('text', x = theta[1], y = theta[2], color = 'blue', label = 'X')
+print(grad.plot)
+```
+
+Note that this looks really similar to the trace of non-stochastic gradient descent. And it seems to get very close to the end value even before it has run through all of the data for the first time. In fact, to see how the trace evolves in the second run-through we need to zoom in very close to the end point:
+
+```{r MD SGD plot zoom, cache=TRUE, warning=FALSE}
+print(grad.plot+xlim(c(.22,.28))+ylim(c(.35,.4)))
+```
+
+```{r MD SGD plot save, warning=FALSE, echo=FALSE, cache=TRUE}
+ggsave('fig_sgd_trace.png',grad.plot + theme(legend.position='none'),width=4, height=4, units='in')
+ggsave('fig_sgd_trace_zoom.png',grad.plot+xlim(c(.22,.28))+ylim(c(.35,.4))+ theme(legend.position='none'),width=4, height=4, units='in')
+```
+
+This demonstrates the power of stochastic gradient descent. With regular gradient descent we only needed to take ~200 steps to get to our final parameter values, whereas we needed ~600 steps for stochastic gradient descent. But importantly, each of those 200 steps in the regular gradient descent required calculating the cost for all 200 observations, whereas we only needed to iterate through all of the data 3 times using stochastic gradient descent. We won't be doing a neural network example directly here, but you can imagine why that might make our lives easier when we have 14 million data points instead.
+
+## Regularization
+
+When we build models of the world, we don't want those models to simply explain the data we train them on, but instead to generalize to new data. If you could train a CNN to correctly label every image in ImageNet, but that CNN was at chance on any new images, that model would be considered a catastropic failure.
+
+However, if we have too many parameters that we are fitting in our models and not enough data, those parameters might get fit not just to the structure in the data, but also to the idiosyncratic noise -- an issue known as *overfitting*. For an example from [wikipedia](https://en.wikipedia.org/wiki/Overfitting), take the graph below. In reality there is a noisy linear relationship between two variables (the black line), but the blue line is a complex polynomial function fit to that data. If we see a new point that falls outside of this range, do you think the linear or polynomial line will do a better job at predicting the relationship?
+
+![Overfitting to a linear function](Wiki_Overfitted_Data.png)
+
+This example makes it trivialy easy to see that a simple model with two parameters (slope and intercept) should do better than a more complex model. But the issue of overfitting come up often when there is hidden flexibility in our models -- for instance, if we take only two fully connected layers from a neural network with $m$ and $n$ neurons respectively, there are $m*n$ weight parameters that we need to fit. If we are using large networks and not a huge amount of data, we might be training our networks to learn things that are particular to the data we give them, not to the structure of the world we want it to infer.
+
+But there are many times we necessarily have lots of parameters and a limited set of data, and we don't want to just throw our hands up in the air and give up. In these cases we can use *regularization*: adapting our initial cost function ($C_0$) to incur additional costs for parameter values that differ from zero. This regularization term is often denoted as $R$, so we can write our cost function (with a weighting parameter $\lambda$) as:
+
+<center>
+$$ C(\theta, D) = C_0(\theta, D) + \lambda * R(\theta) $$
+</center>
+
+A commonly used regularization technique is called $L_2$ (pronounced 'el two') regularization. With this technique, the regularization cost is the sum of the squared magnitudes of each of the parameter values:
+
+<center>
+$$ R(\theta) = \sum\big(||\theta_i||^2\big) $$
+</center>
+
+$L_2$ regularization is nice because it makes $R(\theta)$ differentiable, which allows for easy gradient calculations. But you might also hear about $L_1$ regularization, where the regularization cost is the sum of the absolute value of the parameters.
+
+Let's see an example of how this works. Pretend we have a 'polynomial machine' that takes in a number a spits out another number based on a polynomial equation plus some noise. In reality, the polynomial machine follows the functional form:
+
+<center>
+$$ y = -0.1*x^2 + x^3 - 0.1*x^4 + \epsilon $$
+$$ \epsilon \sim \mathcal{N}(0, 0.6) $$
+</center>
+
+However, we don't know that. All we can do is put numbers in and get numbers out to try to figure out what that polynomial is. We're going to take five random values from between -1 and 1, and feed them into the machines. Below is the plot of these x,y pairs, and the red line is the line of the actual polynomial function.
+
+```{r Reg gen data, warning=FALSE}
+set.seed(823041)
+
+N = 5
+
+reg.gen.func = function(x) {
+  return(-0.1*x^2 + x^3 - 0.1*x^4)
+}
+
+reg.dat = data.frame(x = runif(N,-1,1))
+reg.dat$y = rnorm(N, sapply(reg.dat$x,reg.gen.func), .6)
+
+pl.reg.dat = data.frame(x=seq(-1.5,1.5,by=.01))
+pl.reg.dat$y = sapply(pl.reg.dat$x, reg.gen.func)
+
+baseplot.reg = ggplot(reg.dat, aes(x=x,y=y)) + geom_point() + 
+  geom_line(data=pl.reg.dat,aes(x=x,y=y),color='red') + 
+  xlim(c(-1.5,1.5)) + ylim(c(-3,3))
+print(baseplot.reg)
+```
+
+```{r Make reg gen, warning = FALSE, echo = FALSE}
+ggsave('fig_reg_points.png',ggplot(reg.dat, aes(x=x,y=y)) + geom_point() + xlim(c(-1.5,1.5)) + ylim(c(-3,3)),
+       width = 4, height = 2, units = 'in')
+ggsave('fig_reg_show.png',baseplot.reg,width=4, height=2, units='in')
+```
+
+Now let's try some of the optimization tools we've learned to see if we can get a good understanding of this machine. We'll first define our cost function as the sum of the squared errors between our predictions and the actual data -- this is equivalent to the log-likelihood if the noise in our model is Gaussian, but is numerically much easier to deal with.
+
+Next, we don't know how high the polynomial reaches, but we'll assume we can stop at $x^7$. So our prediction and equation becomes:
+
+<center>
+$$ \hat{y} = \underset{n=0...7}{\sum}b_n*x^n $$
+$$ C_0(\theta,y) = \sum \big [(y_i - \hat{y}_i)^2 \big] $$
+</center>
+
+First, let's try naively to run our optimization to fit parameters without regularization. In the graph below, the dashed brown line is the fit line for our non-regularized optimization.
+
+```{r reg noreg, warning = FALSE}
+reg.cost.fitting = function(params, data = reg.dat) {
+  
+  make.prediction = function(x) {
+    return(sum(x^(seq(length(params))-1)*params))
+  }
+  
+  preds = sapply(reg.dat$x, make.prediction)
+  
+  return(sum((reg.dat$y - preds)^2))
+}
+
+o.noreg = optim(seq(0,8), reg.cost.fitting, method = 'BFGS')
+
+pred.fn = function(x, par) {
+  return(sum(x^(seq(length(par))-1)*par))
+}
+pl.reg.dat$pred.noreg = sapply(pl.reg.dat$x, pred.fn, o.noreg$par)
+
+print(baseplot.reg + geom_line(data=pl.reg.dat,aes(x=x,y=pred.noreg),linetype='dashed',color='orange4'))
+```
+
+Well that doesn't look good or reasonable. It gets each of those points perfectly, but I don't think anyone would think that the function should shoot off into negative numbers the moment it gets outside our observed data.
+
+So instead let's try $L_2$ regularization. Now our cost function becomes:
+
+<center>
+$$ \underset{i}{\sum} \big [(y_i - \hat{y}_i)^2 \big] + \lambda * \underset{j}{\sum} \big [||\theta_j||^2\big] $$
+</center>
+
+And we'll set $\lambda=3$ somewhat arbitrarily to put a slightly bigger cost on the parameters -- in reality setting $\lambda$ is a bit of an art that depends on (a) how much noise you expect in the data, (b) the expected size and number of your parameter values, and (c) how strong you want the regularization to be.
+
+But once we do that we can run our optimization on this new cost function, and the dashed blue line is now the predicted functional form:
+
+```{r reg funcs, warning=FALSE}
+reg.cost.l2 = function(params) {
+  return(sum(params^2))
+}
+
+reg.cost = function(params, data=reg.dat, lambda = 3) {
+  return( reg.cost.fitting(params,data) + lambda*reg.cost.l2(params) )
+}
+
+o = optim(seq(0,8), reg.cost, method = 'BFGS')
+pl.reg.dat$pred = sapply(pl.reg.dat$x, pred.fn,o$par)
+
+print(baseplot.reg + 
+        geom_line(data=pl.reg.dat,aes(x=x,y=pred.noreg),linetype='dashed',color='orange4') +
+        geom_line(data=pl.reg.dat,aes(x=x,y=pred),linetype='dashed',color='blue'))
+```
+
+```{r reg save regs, warning=FALSE, echo=FALSE}
+pl.reg.tmp = baseplot.reg + geom_line(data=pl.reg.dat,aes(x=x,y=pred.noreg),linetype='dashed',color='orange4')
+ggsave('fig_reg_noreg.png',pl.reg.tmp,width=4, height=2,units = 'in')
+pl.reg.tmp = pl.reg.tmp + geom_line(data=pl.reg.dat,aes(x=x,y=pred),linetype='dashed',color='blue')
+ggsave('fig_reg_wreg.png', pl.reg.tmp,width=4,height=2,units='in')
+rm(pl.reg.tmp)
+```
+
+You may look at this regularized model and think that it's not capturing the functional form all that well, and that it's entirely too linear. But in fact this is a **good** thing -- we don't have much data so we want our model to be relatively simple. After all, if all you saw were the black dots, wouldn't you think the function was supposed to be rougly linear too?
+
+So if we have very little data, regularization gives us a simple model, while ignoring regularization gives us a model that is overfit to the data. But what if we have even more data, say 50 numbers we've fed through the machine?
+
+```{r reg moredata, warning=FALSE}
+N = 50
+reg.dat = data.frame(x = runif(N,-1,1))
+reg.dat$y = rnorm(N, sapply(reg.dat$x,reg.gen.func), .4)
+
+pl.reg.dat = data.frame(x=seq(-1.5,1.5,by=.01))
+pl.reg.dat$y = sapply(pl.reg.dat$x, reg.gen.func)
+
+baseplot.reg = ggplot(reg.dat, aes(x=x,y=y)) + geom_point() + 
+  geom_line(data=pl.reg.dat,aes(x=x,y=y),color='red') + 
+  xlim(c(-1.5,1.5)) + ylim(c(-3,3))
+
+o.noreg = optim(seq(0,8), reg.cost.fitting, method = 'BFGS')
+pl.reg.dat$pred.noreg = sapply(pl.reg.dat$x, pred.fn, o.noreg$par)
+
+o = optim(seq(0,8), reg.cost, method = 'BFGS')
+pl.reg.dat$pred = sapply(pl.reg.dat$x, pred.fn,o$par)
+
+print(baseplot.reg + 
+        geom_line(data=pl.reg.dat,aes(x=x,y=pred.noreg),linetype='dashed',color='orange4') +
+        geom_line(data=pl.reg.dat,aes(x=x,y=pred),linetype='dashed',color='blue'))
+```
+
+```{r reg save more, warning=FALSE, echo=FALSE}
+ggsave('fig_reg_more_base.png',baseplot.reg,width=4,height=2,units='in')
+tmp.plt = baseplot.reg + 
+        geom_line(data=pl.reg.dat,aes(x=x,y=pred.noreg),linetype='dashed',color='orange4') +
+        geom_line(data=pl.reg.dat,aes(x=x,y=pred),linetype='dashed',color='blue')
+ggsave('fig_reg_more.png',tmp.plt,width=4,height=2,units='in')
+rm(tmp.plt)
+```
+
+Now our regularized model does a pretty good job matching the actual function, including doing a decent job of predicting the function outside of the $[-1,1]$ range it has seen data in. Because we have more data, the model is willing to incur a higher cost from regularization to make sure that the fitting cost is reduced. In contrast, the non-regularized function *still* does a bad job generalizing outside of its observations (and it takes somewhere between 500-1000 data points before it starts matching the regularized model well).
+
+This is a simple example of how we can get good, generalizable models from our data even if we have lots of free parameters. And in many of the machine learning and neural network problems this is a huge benefit -- by using regularization we can do a better job of fitting networks that generalize beyond our training data to our test data.
+
+## Sparse coding
+
+If you train a neural network with a simple loss function, the weights often become set so that predictions arise from a blend of contributions across almost all of your artificial neurons. But this is not how the brain works -- it takes energy to produce a neural spike, so for efficiency neural representations are based on as few neural activations as possible. This feature is called *sparse coding* since it encourages sparsity in the amount of activation throughout the network.
+
+Sparsity has many benefits in neural networks, helping neurons represent basic features individually in ways that may also be exploited by the brain (e.g., you are likely to hear about [Olshausen & Field (1996)](http://www.cns.nyu.edu/~tony/vns/readings/olshausen-field-1996.pdf) for how we can capture features of V1).
+
+However, sparsity is also easy to produce -- we use a very similar techinque to regularization, except instead of adding a cost that depends on the value of the parameters, we add a cost that depends on the size of the inputs:
+
+<center>
+$$ C(\theta, D) = C_0(\theta, D) + \lambda * S(A) $$
+</center>
+
+Often this sparsity cost is calculated as the $L_1$ distance:
+
+<center>
+$$ S(A) = \underset{1...N}{\sum}abs(a_i)$$
+</center>
+
+Or sometimes the cost is the log penalty:
+
+<center>
+$$ S(A) = \underset{1...N}{\sum}log(1+a_i^2) $$
+</center>
+
+So just like regularization, sparsity can improve the way that your model captures the world by making sure the cost doesn't just capture the end fits, but also adds a cost for complex representations.
+
+## Momentum
+
+Let's try another two-variable optimization problem that you may have seen before but we will try to solve in a new way: fitting the intercept and slope of a linear regression. For this we'll use a public dataset from Calvin College that looks at the ACT scores and senior year GPA of a sampling of their students. We might want to know how much higher we would predict a senior's GPA to be if they had one point higher on the ACT -- this is the slope of the regression line.
+
+First, let's load in the data and look at the relationship:
+
+```{r gpa data}
+gpa.data = read.csv("http://www.calvin.edu/~stob/data/actgpanona.csv")
+qplot(ACT,GPA,data=gpa.data)
+```
+
+```{r save gpa data, echo=FALSE}
+ggsave('fig_gpa_data.png',last_plot(),width=4,height=2,units='in')
+```
+
+Now, if we want to fit a regression line, we need to determine the parameterization of the intercept ($b_0$) and slope ($b_1$). If we know these parameters, we can make a prediction about the GPA:
+
+<center>
+$$ \widehat{GPA} = b_0 + b_1*ACT $$
+</center>
+
+We can then set our cost function as the sum of the squared errors, just as in our regularization example above, and view the cost function:
+
+```{r gpa functions}
+gpa.cost = function(params, data = gpa.data) {
+  intercept = params[1]
+  slope = params[2]
+  predicted = intercept + slope*data$ACT
+  error = data$GPA - predicted
+  return(sum(error^2))
+}
+
+gpa.grid.df = data.frame(intercept = rep(seq(-2,4,by=.03),times=201),
+                         slope = rep(seq(-.1, .3, by=.002), each=201))
+gpa.grid.df$Cost = mapply(function(i,s) {gpa.cost(c(i,s))}, gpa.grid.df$intercept, gpa.grid.df$slope)
+
+gpa.plot = ggplot(gpa.grid.df, aes(x=intercept, y=slope)) + 
+  geom_raster(aes(fill=Cost)) + scale_fill_gradient(trans = 'log', low='red', high='yellow') +
+  xlab('Intercept') + ylab('Slope')
+
+print(gpa.plot)
+```
+
+```{r gpa save, echo=FALSE}
+ggsave('fig_gpa_plot.png',gpa.plot+theme(legend.position='none'),height=2,width=4,units='in')
+```
+
+
+Hmm... slightly different look than the cost function in our original two-parameter optimization example. Oh well, let's try gradient descent in the same way we have before.
+
+```{r MD gradient, cache=TRUE}
+gpa.gradient = function(params, epsilon = .001) {
+  intercept = params[1]
+  slope = params[2]
+  i.plus = gpa.cost(c(intercept + epsilon, slope))
+  i.minus = gpa.cost(c(intercept - epsilon, slope))
+  s.plus = gpa.cost(c(intercept, slope + epsilon))
+  s.minus = gpa.cost(c(intercept, slope - epsilon))
+  return(c((i.plus - i.minus) / (2*epsilon),
+           (s.plus - s.minus) / (2*epsilon)))
+}
+
+theta = c(0,0.1)
+gamma = .00005
+tau = .00001
+
+theta.vals = list(theta)
+
+prior.cost = gpa.cost(theta)
+running = TRUE
+while(running) {
+  grad = gpa.gradient(theta)
+  theta = theta - gamma * grad
+  theta.vals = append(theta.vals, list(theta))
+  new.cost = gpa.cost(theta)
+  if(abs(new.cost - prior.cost) < tau) {
+    running = FALSE
+  } else {
+    prior.cost = new.cost
+  }
+}
+writeLines(paste("b0: ",theta[1],"\nb1: ",theta[2],sep=''))
+```
+
+Wait a second though, we also know about linear regression from a statistics course, right? So let's just use that to get the coefficients instead:
+
+```{r MD reg}
+gpa.lm = lm(data=gpa.data, GPA ~ ACT)
+writeLines(paste("From regression:\nb0: ",coef(gpa.lm)[1],"\nb1: ",coef(gpa.lm)[2],sep=''))
+```
+
+These give us two different answers. So what gives? To see what the issue is, let's just look at the first ten points that we visit during our gradient descent (and I'm going to zoom in as well):
+
+```{r Show zag}
+gpa.thetas.df = data.frame(x=sapply(theta.vals,function(p){p[1]}),
+                           y=sapply(theta.vals,function(p){p[2]}),
+                           n=1:length(theta.vals))
+print(gpa.plot + 
+        geom_point(data=gpa.thetas.df[1:10,],aes(x=x,y=y)) +
+        geom_text_repel(data=gpa.thetas.df[1:10,],aes(x=x,y=y,label=n),color='blue') + 
+        xlim(c(-.5,.5)) + ylim(c(.05,.2)))
+```
+
+You might notice that the even numbers are above the most red part, and the odd numbers are below it. That's because the gradient points so steeply down the trough in likelihood that the biggest change is almost entirely vertical.
+
+If we map out the full path of gradient descent, we see that we eventually hit the bottom of the trough, but down there is very little difference in cost function, so we don't get too far until we find a "good enough" answer:
+
+```{r Show zag full}
+print(gpa.plot + geom_path(data=gpa.thetas.df,aes(x=x,y=y)))
+```
+
+```{r Save zag plots, echo=FALSE}
+ggsave('fig_zag_full.png',gpa.plot + geom_path(data=gpa.thetas.df,aes(x=x,y=y))+theme(legend.position='none'),
+       width=2,height=2,units='in')
+ggsave('fig_zag_zoom.png',gpa.plot + 
+        geom_point(data=gpa.thetas.df[1:10,],aes(x=x,y=y)) +
+        geom_text_repel(data=gpa.thetas.df[1:10,],aes(x=x,y=y,label=n),color='blue', size=2) + 
+        xlim(c(-.5,.5)) + ylim(c(.05,.2)) + theme(legend.position='none'),
+       width=2,height=2,units='in')
+```
+
+Now, we could get a better answer if we set our $\tau$ threshold to be lower, but we already are calling our function a huge number of times because it zig-zags back and forth:
+
+```{r Show N no mom}
+writeLines(paste("Number of optimization iterations:", length(theta.vals)))
+```
+
+This is a common problem in optimization -- if we have troughs in the cost function, gradient descent can send us perpendicularly in parameter space to the direction of the minimum we are looking for. This means that we are wasting lots of computation while our parameter values go back and forth across the valley. So while we could get a more accurate estimate of our parameters with a lower $\tau$ threshold, this would also lead to optimization taking significantly longer (especially as we have more than two parameters).
+
+To solve this issue, however, you can build in 'momentum' to your gradient descent: if you have been descending in a constant direction for a little while, you should be confident that you should continue in that direction, but if you are zig-zagging back and forth you don't want to update your parameters as much. This is done by updating parameters not just based on the direction of the gradient, but also partly based on the amount you changed the parameters in your last step (thus keeping up momentum). In mathematical terms, this means that:
+
+<center>
+$$ \theta_{t+1} = \theta_t + \Delta \theta_t $$
+$$ \Delta \theta_t = -\gamma * \nabla C(\theta_t) + \alpha * \Delta \theta_{t-1} $$
+</center>
+
+Here $\alpha$ is a control parameter in the range of $[0,1)$ that decides how much momentum we want to keep from the prior step.
+
+We can now run gradient descent with momentum and see what happens:
+
+```{r momentum}
+theta = c(0,0.1)
+gamma = .00005
+alpha = .95
+tau = .00001
+
+theta.vals.mom = list(theta)
+prior.cost.mom = gpa.cost(theta)
+prior.dtheta = 0
+running = TRUE
+while(running) {
+  grad = gpa.gradient(theta)
+  dtheta = -gamma * grad + alpha * prior.dtheta
+  theta = theta + dtheta
+  theta.vals.mom = append(theta.vals.mom, list(theta))
+  new.cost = gpa.cost(theta)
+  if(abs(new.cost - prior.cost) < tau) {
+    running = FALSE
+  } else {
+    prior.cost = new.cost
+    prior.dtheta = dtheta
+  }
+}
+writeLines(paste("b0: ",theta[1],"\nb1: ",theta[2],sep=''))
+```
+
+This answer is slightly closer to the best model we get from analytical regression, but additionally we get there with much less computation:
+
+```{r Show N mom}
+writeLines(paste("Number of optimization iterations with momentum:", length(theta.vals.mom)))
+```
+
+So now if we wanted to set $\tau$ to a lower value, we could. But more importantly, if we are doing optimization where we are limited by computation time rather than simply trying to reduce the change in cost below a threshold (e.g., fitting a large neural network), this means that our optimization will be much more effective per unit of time.
+
